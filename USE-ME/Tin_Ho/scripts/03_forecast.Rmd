@@ -80,9 +80,15 @@ for (i in seq_len(nrow(test_data))) {
 }
 cat("Testing Period start date:", format(min(test_data$week), "%Y-%m-%d"), "\n")
 cat("Forecast dates:\n")
-for (date in forecast_df$forecast_date) {
-  cat("  ", format(date, "%Y-%m-%d"), "\n")
+#for (date in forecast_df$forecast_date) {
+#  cat("  ", format(date, "%Y-%m-%d"), "\n")
+#}
+for (i in 1:nrow(forecast_df)) {
+  date <- forecast_df$forecast_date[i]
+  cat(" ", format(date, "%Y-%m-%d"), "\n")
 }
+
+
 cat("Forecasting horizon:", horizon, "\n")
 
 # Save outputs

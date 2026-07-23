@@ -139,3 +139,30 @@ set; subsequent forecasts will use an
 **Validations:** Print the `Testing Period` start date, and each forecast date.
 **Validations:** Print the specified forecasting horizon that will be used.
 
+## 4 Forcasting
+
+Perform a forecasting.  
+Use the auto.arima() functiojn from the forecast package
+
+- Compute the reference date as the calendar date exactly one week before the target date: reference_date = as_date(t) - days(7)
+- Use this date (reference_date) for both training-window selection and for output.
+- When writing CSVs, format reference_date andtarget_end_date as ISO dates (`YYYY-MM-DD`).
+
+**Validations:** Print confirmation that reference_date and the target t are both
+Date objects (not character or POSIXct); halt if either fails the class check.
+**Validations:** Print confirmation that target_end_date - reference_date
+equals exactly 7 days for every row; halt if this fails.
+**Validations:** Print confirmation that the maximum week in the training
+window is <= reference_date and strictly less than the target_end_date
+(no look-ahead leakage); halt if this fails.
+
+## 5. Forecast generation
+
+For each target week `t` in
+the testing period that is present in the data: 
+
+Fit the ARIMA model (Rule 4) on all rows with
+`week <= reference_date` (expanding-window).
+
+save result to `output/scripts/03_forecast_deux.Rmd`
+
