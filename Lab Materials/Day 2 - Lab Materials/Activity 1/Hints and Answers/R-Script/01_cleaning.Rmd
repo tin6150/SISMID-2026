@@ -1,0 +1,311 @@
+---
+title: "Cleaning US Influenza Admissions Data"
+subtitle: "From a raw surveillance CSV to a tidy, forecast-ready table"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: readable
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,        # show the code so students can read along
+  message = FALSE,    # hide package startup chatter
+  warning = FALSE     # keep the narrative clean; we validate explicitly below
+)
+```
+
+## What this script does, and why
+
+Before we can *explore* or *model* respiratory data, we need a clean, predictable table to build on. Raw surveillance exports are rarely in the shape we want: they carry hundreds of columns we don't need, mix geographies together, and store numbers as text.
+
+This document walks through a small cleaning pipeline that takes the CDC weekly Hospital Respiratory Data (HRD) export and produces one tidy file: **one row per week** of **US** influenza admissions, with exactly three columns — `week`, `location`, and `value`. That three-column shape is deliberate: it matches the tidy layout the rest of our modeling and FluSight work expects downstream.
+
+A theme to notice throughout: **we make our assumptions explicit and check them.** Nearly every block below either states what it expects or verifies that it got it. That habit is what turns a script you *hope* works into a script you can *trust*.
+
+## Packages, checked before they're loaded
+
+We lean on three packages here. `readr` gives us fast, predictable CSV reading and writing with explicit control over column types. `dplyr` gives us the verbs (`filter`, `transmute`, `arrange`) that make the transformation readable. `ggplot2` draws the epicurve at the end.
+
+Rather than assume they're installed, we check first and stop with a helpful message if any are missing — so a fresh machine fails with "here's what to install" instead of a cryptic error deep in the script.
+
+```{r packages}
+required_pkgs <- c("readr", "dplyr", "ggplot2")
+
+# Which of the required packages can't R find?
+missing_pkgs <- required_pkgs[!vapply(
+  required_pkgs, requireNamespace, logical(1), quietly = TRUE
+)]
+
+# If any are missing, stop now and say exactly how to fix it.
+if (length(missing_pkgs) > 0) {
+  stop(
+    "Missing required package(s): ", paste(missing_pkgs, collapse = ", "),
+    ". Install with install.packages(c(",
+    paste0('"', missing_pkgs, '"', collapse = ", "), ")).",
+    call. = FALSE
+  )
+}
+
+suppressPackageStartupMessages({
+  library(readr)
+  library(dplyr)
+  library(ggplot2)
+})
+```
+
+## Define file paths in one place
+
+We name every file the script touches up front, rather than scattering paths through the code. This gives us a single source of truth: if the data moves or we rename an output, we change it once, here.
+
+Notice the structure of the output paths — `output/data/01_cleaning/...` and `output/figures/01_cleaning/...`. Keeping each script's outputs in a folder named after the script (`01_cleaning`) means results never collide and it's always obvious which step produced which file.
+
+```{r paths}
+input_path  <- "data/Weekly Hospital Respiratory Data (HRD) Metrics by Jurisdiction.csv"
+output_path <- "output/data/01_cleaning/cleaned_flu_admissions.csv"
+figure_path <- "output/figures/01_cleaning/epicurve_us_flu_admissions.png"
+```
+
+> **Knitting note:** these are *relative* paths, so they assume your working directory is the project root (the folder that contains `data/`). When you knit an `.Rmd`, R uses the document's own folder as the working directory by default, so if the knit can't find the input file, that's usually the reason.
+
+Because we'd rather catch a bad path here than three chunks later, we confirm the input actually exists before doing anything with it.
+
+```{r check-input}
+if (!file.exists(input_path)) {
+  stop(
+    "Input file not found: ", input_path,
+    "\nSet the working directory to the project root (the folder containing ",
+    "data/). Current working directory: ", getwd(),
+    call. = FALSE
+  )
+}
+```
+
+## Create output folders if they don't exist
+
+A script shouldn't assume its destination folders are already there. `dir.create` with `recursive = TRUE` builds the full folder tree, and `showWarnings = FALSE` keeps it quiet when the folders already exist (which is the normal case on a re-run). `dirname()` just strips the filename off, leaving the folder to create.
+
+```{r make-dirs}
+dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
+dir.create(dirname(figure_path), recursive = TRUE, showWarnings = FALSE)
+```
+
+## Read only the columns we need
+
+The raw export is wide — roughly 400 columns — but we only care about three things: the week, the geography, and the influenza admissions count. `col_select` pulls just those, which is faster and keeps our attention on what matters.
+
+Two deliberate choices are worth calling out:
+
+- **Read everything as character** (`col_types = cols(.default = col_character())`). It may feel odd to read numbers as text, but it means *we* decide when and how each column becomes a number — instead of letting `readr` guess from the first few rows and occasionally get it wrong on messy surveillance data. We convert on purpose in a later step.
+- **`any_of(...)` for the admissions column.** Different exports of this dataset spell the column either `Total.Influenza.Admissions` (dots) or `Total Influenza Admissions` (spaces). `any_of()` will grab whichever one is present and silently ignore the other, so the read doesn't break either way.
+
+```{r read-raw}
+raw <- read_csv(
+  input_path,
+  col_select = c(
+    `Week Ending Date`,
+    `Geographic aggregation`,
+    any_of(c("Total.Influenza.Admissions", "Total Influenza Admissions"))
+  ),
+  col_types = cols(.default = col_character()),
+  show_col_types = FALSE
+)
+```
+
+## Figure out which spelling of the column we actually got
+
+We handled *reading* either spelling above; now we need to know which one landed in `raw` so we can refer to it downstream. We check both candidate names against the columns that actually exist and keep the first match.
+
+If neither is present, something is wrong with the input file, and we `stop()` immediately with a clear message rather than failing mysteriously three steps later. **Fail early, fail loudly, and say why** — future-you (or a classmate re-running this) will thank you.
+
+```{r resolve-column}
+# Support both dotted and spaced versions of the influenza admissions column name.
+influenza_col <- c("Total.Influenza.Admissions", "Total Influenza Admissions")
+influenza_col <- influenza_col[influenza_col %in% names(raw)][1]
+
+if (is.na(influenza_col)) {
+  stop("Could not find influenza admissions column in input data.", call. = FALSE)
+}
+```
+
+## Reshape into the tidy table we want
+
+This is the heart of the script. Reading it as a pipeline, top to bottom:
+
+- **`filter(...)`** keeps only the national ("USA") rows, dropping every state and territory. This step is why our output is US-only.
+- **`transmute(...)`** builds a brand-new set of columns and drops everything else (unlike `mutate`, which keeps the originals). We create exactly the three we want:
+  - `week` — the `Week Ending Date` text turned into a real `Date`, so it sorts and plots correctly as time.
+  - `location` — hard-coded to `"US"`, a stable label for the national series.
+  - `value` — the admissions count. `parse_number()` pulls the numeric value out of the character column, tolerating comma-formatted counts such as `"1,110"`. `.data[[...]]` lets us reference the column by the *name we resolved* a moment ago, whichever spelling it turned out to be.
+- **`arrange(week)`** sorts chronologically, so the series reads left-to-right in time — important for both the checks and the plot that follow.
+
+```{r clean}
+cleaned <- raw %>%
+  filter(`Geographic aggregation` == "USA") %>%
+  transmute(
+    week = as.Date(`Week Ending Date`, format = "%Y-%m-%d"),
+    location = "US",
+    value = readr::parse_number(.data[[influenza_col]])
+  ) %>%
+  arrange(week)
+```
+
+## Take a look at the cleaned data
+
+Before trusting anything, let's actually *see* what we built. `dim()` reports the shape — how many weeks (rows) and columns we ended up with — and `head()` prints the first several rows so we can eyeball the values. Notice the column types shown under each name: `week` is a `date`, `location` is text (`chr`), and `value` is a number (`dbl`) — exactly the three-column, correctly-typed layout we were aiming for.
+
+```{r peek}
+dim(cleaned)      # number of weeks (rows) and columns
+head(cleaned, 10) # first ten weeks of the cleaned series
+```
+
+## Check that the result is what we promised
+
+Here we verify the cleaned table against a small contract we set for ourselves. Each `stop()` halts the script the moment a claim turns out to be false, so a bad result can never quietly slip into the next stage of the pipeline. We spell each check out separately, and phrase its failure message to say *exactly* what went wrong — a report that stops with "week contains 3 NA values after date parsing" is far easier to debug than a bare `FALSE`.
+
+Read these as a checklist of everything we're claiming about `cleaned`:
+
+- at least one row survived the filter (we didn't accidentally wipe everything out);
+- the columns are *exactly* `week`, `location`, `value`, in that order;
+- every row is US;
+- `week` really is a `Date`, with no missing values from a bad parse;
+- `value` really is numeric, with no missing values from a bad parse.
+
+Writing checks like these is a genuinely useful habit: they're an objective, machine-verifiable definition of "done" that the data has to satisfy before any later step is allowed to build on it.
+
+```{r checks}
+# There has to be something left after filtering to USA.
+if (nrow(cleaned) == 0) {
+  stop(
+    "Validation failed: no rows remain after filtering to ",
+    "`Geographic aggregation` == \"USA\".",
+    call. = FALSE
+  )
+}
+
+# The columns must be exactly week, location, value, in that order.
+if (!identical(names(cleaned), c("week", "location", "value"))) {
+  stop(
+    "Validation failed: columns must be exactly week, location, value (in that ",
+    "order). Found: ", paste(names(cleaned), collapse = ", "), ".",
+    call. = FALSE
+  )
+}
+
+# Every location label should read "US".
+if (!all(cleaned$location == "US")) {
+  stop(
+    "Validation failed: every `location` value must be \"US\". Found: ",
+    paste(unique(cleaned$location), collapse = ", "), ".",
+    call. = FALSE
+  )
+}
+
+# week must be a Date...
+if (!inherits(cleaned$week, "Date")) {
+  stop(
+    "Validation failed: `week` must be a Date. Found class: ",
+    paste(class(cleaned$week), collapse = "/"), ".",
+    call. = FALSE
+  )
+}
+
+# ...and every date must have parsed successfully.
+if (any(is.na(cleaned$week))) {
+  stop(
+    "Validation failed: `week` contains ", sum(is.na(cleaned$week)),
+    " NA value(s) after date parsing. Check the format of `Week Ending Date`.",
+    call. = FALSE
+  )
+}
+
+# value must be numeric...
+if (!is.numeric(cleaned$value)) {
+  stop(
+    "Validation failed: `value` must be numeric. Found class: ",
+    paste(class(cleaned$value), collapse = "/"), ".",
+    call. = FALSE
+  )
+}
+
+# ...and every count must have parsed successfully.
+if (any(is.na(cleaned$value))) {
+  stop(
+    "Validation failed: `value` contains ", sum(is.na(cleaned$value)),
+    " NA value(s) after parsing column `", influenza_col, "`.",
+    call. = FALSE
+  )
+}
+```
+
+## Save the cleaned data
+
+With the table validated, we write it out as a CSV — the artifact the next scripts will read. The final check confirms the file actually landed on disk, closing the loop on "did this step really succeed?"
+
+```{r write}
+write_csv(cleaned, output_path)
+
+if (!file.exists(output_path)) {
+  stop("Validation failed: expected output CSV was not created at ", output_path, ".",
+       call. = FALSE)
+}
+```
+
+## Draw an epicurve as a visual sanity check
+
+Numbers passing checks is one kind of confidence; *seeing* the data is another. A quick epidemic curve (an "epicurve") — admissions plotted over time — instantly reveals whether the series has the seasonal flu shape we'd expect, or whether something looks off.
+
+We build the plot once with `ggplot2` and use it twice: **render it inline** so you can see it right here in the knitted document, and **save a high-resolution copy to disk** (the version the pipeline and any report would use). A few details in this block:
+
+- `geom_col()` draws one bar per week; the `#2C7FB8` blue and a fixed bar `width` keep it reading as a clean curve rather than a cluttered bar chart.
+- `scale_x_date()` labels the time axis every six months, so a multi-season series stays legible.
+- `theme_minimal()` strips the chart back to the data, and rotating the x-axis text keeps the date labels from colliding.
+
+```{r epicurve, fig.width=10, fig.height=4.5, fig.cap="US weekly influenza admissions (NHSN HRD)."}
+epicurve <- ggplot(cleaned, aes(x = week, y = value)) +
+  geom_col(fill = "#2C7FB8", width = 6) +
+  scale_x_date(date_labels = "%b %Y", date_breaks = "6 months") +
+  labs(
+    title = "Weekly influenza hospital admissions, United States",
+    subtitle = paste0(
+      format(min(cleaned$week), "%d %b %Y"), " to ",
+      format(max(cleaned$week), "%d %b %Y"), " (NHSN HRD)"
+    ),
+    x = "Week ending",
+    y = "Admissions"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# Show it in the knitted document...
+epicurve
+
+# ...and save the same figure to disk for the pipeline to reuse.
+ggsave(figure_path, plot = epicurve, width = 10, height = 4.5, dpi = 300)
+
+if (!file.exists(figure_path)) {
+  stop("Validation failed: expected epicurve was not created at ", figure_path, ".",
+       call. = FALSE)
+}
+```
+
+## Where this leads
+
+We now have a small, trustworthy file — `cleaned_flu_admissions.csv` — plus a picture of the series. That clean table is the foundation for the next steps: exploring the data more deeply and, from there, fitting forecasting models. Every minute spent making this step reliable pays off in every step that builds on it.
+
+```{r summary, echo=FALSE}
+cat(
+  "01_cleaning complete.\n",
+  "  Source column: ", influenza_col, "\n",
+  "  Rows written:  ", nrow(cleaned), "\n",
+  "  Date range:    ", format(min(cleaned$week)), " to ",
+                       format(max(cleaned$week)), "\n",
+  "  Cleaned data:  ", output_path, "\n",
+  "  Epicurve:      ", figure_path, "\n",
+  sep = ""
+)
+```
