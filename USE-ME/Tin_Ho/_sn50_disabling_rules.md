@@ -1,3 +1,6 @@
+
+# **do not use this file, use the version names rules.md**
+
 # Data Cleaning Rules
 
 These rules define how the agent should generate `output/scripts/01_cleaning.R`. Follow each
