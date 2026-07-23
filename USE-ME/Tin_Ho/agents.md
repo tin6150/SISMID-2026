@@ -49,14 +49,18 @@ The cleaning script must stop on failure if any of these checks fail:
    - Use the season start year and end year naming convention such as 2025-2026.
 
 ## Required workflow for forecasting
-1. Create or update the R script at scripts/03_forecast.R.
+1. Create or update the R Markdown script at scripts/03_forecast_deux.Rmd.
 2. Read the cleaned data from output/data/01_cleaning/cleaned_flu_admissions.csv.
 3. Validate that week is a Date column, location is character with values of US, and value is numeric.
 4. If any column cannot be parsed, stop with the message "The {column} could not be parsed."
 5. Use all observed weeks strictly before the first week of the testing period as the fixed initial training set and use an expanding window for later forecasts.
 6. Print the training period start date, the rolling window end dates, the testing period start date, each forecast date, and the forecasting horizon.
-7. Save the forecast output to output/data/03_forecast/forecast.csv.
-8. Save a forecast plot to output/figures/03_forecast/forecast.png.
+7. Use auto.arima() from the forecast package for forecasting.
+8. Compute reference_date as the calendar date exactly one week before each target date, and use it for both training-window selection and output.
+9. Write output CSVs with reference_date and target_end_date formatted as ISO dates (YYYY-MM-DD).
+10. Validate that reference_date and target date are Date objects, that target_end_date - reference_date equals 7 days for every row, and that the maximum week in the training window is less than the target_end_date without look-ahead leakage.
+11. Save the forecast output to output/data/03_forecast/forecast.csv.
+12. Save a forecast plot to output/figures/03_forecast/forecast.png.
 
 ## Implementation notes
 - Use explicit parsing rather than relying on automatic type inference.
