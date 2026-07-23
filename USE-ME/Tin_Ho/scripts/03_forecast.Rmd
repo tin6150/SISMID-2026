@@ -1,0 +1,106 @@
+```{r}
+library(readr)
+library(dplyr)
+library(lubridate)
+
+input_csv <- "../output/data/01_cleaning/cleaned_flu_admissions.csv"
+output_csv <- "../output/data/03_forecast/forecast.csv"
+output_plot <- "../output/figures/03_forecast/forecast.png"
+
+# Ensure output directories exist
+for (dir_path in c(dirname(output_csv), dirname(output_plot))) {
+  dir.create(dir_path, recursive = TRUE, showWarnings = FALSE)
+}
+
+# Read data
+raw_data <- read_csv(input_csv, col_types = cols(week = col_date(), location = col_character(), value = col_double()))
+
+# Validate structure and attempt conversion if needed
+if (!"week" %in% names(raw_data) || !inherits(raw_data$week, "Date")) {
+  raw_data$week <- tryCatch(as.Date(raw_data$week), error = function(e) NULL)
+  if (is.null(raw_data$week) || !inherits(raw_data$week, "Date")) {
+    stop("The week could not be parsed.")
+  }
+}
+
+if (!"location" %in% names(raw_data)) {
+  stop("The location could not be parsed.")
+}
+raw_data$location <- as.character(raw_data$location)
+if (any(raw_data$location != "US")) {
+  stop("The location could not be parsed.")
+}
+
+if (!"value" %in% names(raw_data) || !is.numeric(raw_data$value)) {
+  raw_data$value <- suppressWarnings(as.numeric(raw_data$value))
+  if (!is.numeric(raw_data$value)) {
+    stop("The value could not be parsed.")
+  }
+}
+
+# Prepare ordered series
+series <- raw_data %>%
+  arrange(week) %>%
+  select(week, value)
+
+if (nrow(series) < 2) {
+  stop("Not enough data for forecasting.")
+}
+
+# Define testing period as the last 4 weeks of the observed data
+horizon <- 4
+n_total <- nrow(series)
+test_start_index <- n_total - horizon + 1
+training_end_index <- test_start_index - 1
+
+training_data <- series[1:training_end_index, , drop = FALSE]
+test_data <- series[test_start_index:n_total, , drop = FALSE]
+
+# Simple expanding-window naive forecast using the mean of the training history
+# Forecast each test week based on the mean of the training values available up to that point.
+forecast_rows <- vector("list", horizon)
+for (i in seq_len(horizon)) {
+  train_window_end <- test_start_index + i - 2
+  train_window <- series[1:train_window_end, , drop = FALSE]
+  forecast_value <- mean(train_window$value, na.rm = TRUE)
+  forecast_rows[[i]] <- tibble::tibble(
+    forecast_date = test_data$week[i],
+    forecast_value = forecast_value,
+    actual_value = test_data$value[i]
+  )
+}
+
+forecast_df <- dplyr::bind_rows(forecast_rows)
+
+# Print validations requested by the rules
+cat("Training Period start date:", format(min(training_data$week), "%Y-%m-%d"), "\n")
+cat("Rolling window end dates:\n")
+for (i in seq_len(nrow(test_data))) {
+  cat("  ", format(series$week[test_start_index + i - 1], "%Y-%m-%d"), "\n")
+}
+cat("Testing Period start date:", format(min(test_data$week), "%Y-%m-%d"), "\n")
+cat("Forecast dates:\n")
+for (date in forecast_df$forecast_date) {
+  cat("  ", format(date, "%Y-%m-%d"), "\n")
+}
+cat("Forecasting horizon:", horizon, "\n")
+
+# Save outputs
+readr::write_csv(forecast_df, output_csv)
+png(filename = output_plot, width = 1600, height = 900, res = 200)
+plot(
+  x = forecast_df$forecast_date,
+  y = forecast_df$forecast_value,
+  type = "b",
+  pch = 16,
+  col = "blue",
+  main = "Forecast of Influenza Admissions",
+  xlab = "week",
+  ylab = "forecast"
+)
+dev.off()
+
+message(paste("Forecast output written to", output_csv))
+message(paste("Forecast plot written to", output_plot))
+
+```

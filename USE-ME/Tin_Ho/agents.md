@@ -48,6 +48,16 @@ The cleaning script must stop on failure if any of these checks fail:
    - Assign dates in early January with epiweek >= 40 to the previous year's season.
    - Use the season start year and end year naming convention such as 2025-2026.
 
+## Required workflow for forecasting
+1. Create or update the R script at scripts/03_forecast.R.
+2. Read the cleaned data from output/data/01_cleaning/cleaned_flu_admissions.csv.
+3. Validate that week is a Date column, location is character with values of US, and value is numeric.
+4. If any column cannot be parsed, stop with the message "The {column} could not be parsed."
+5. Use all observed weeks strictly before the first week of the testing period as the fixed initial training set and use an expanding window for later forecasts.
+6. Print the training period start date, the rolling window end dates, the testing period start date, each forecast date, and the forecasting horizon.
+7. Save the forecast output to output/data/03_forecast/forecast.csv.
+8. Save a forecast plot to output/figures/03_forecast/forecast.png.
+
 ## Implementation notes
 - Use explicit parsing rather than relying on automatic type inference.
 - Do not use parse_double() directly on comma-formatted counts.
