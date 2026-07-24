@@ -479,3 +479,24 @@ Image save requirements:
   **Forecast Median** line and its **95% PI** band. Color must map to horizon
   consistently between each median line and its PI band; the 95% PI legend
   elements show the color swatch for the band.
+
+
+
+# Forecast Evaluation
+Save all code in this section to `output/scripts/04_evaluation.R`. If the folder path is not present, create it before saving the script.
+Use the **scoringutils** package to compute the metrics — do not hand-code the scoring formulas.
+
+## 1. Input Data
+
+input file for forecast: `output/data/03_forecast/flusight_forecasts.csv`
+
+observed data: `output/data/01_cleaning/cleaned_flu_admissions.csv`
+
+provide the file paths for the forecasts & observed data), merge them on a common key, and drop targets with no observed value. 
+
+join forecast and observed table by 
+target_end_date & week
+
+Only forecasts with a matching observed value can be scored. The 2- and 3-week-ahead targets that fall beyond the last observed week have no truth to compare against, so we drop them.
+Including a message of how many combinations were dropped for lack of an observed target will act as a check in the code 
+
