@@ -480,7 +480,7 @@ Image save requirements:
   consistently between each median line and its PI band; the 95% PI legend
   elements show the color swatch for the band.
 
-
+---
 
 # Forecast Evaluation
 Save all code in this section to `output/scripts/04_evaluation.R`. If the folder path is not present, create it before saving the script.
@@ -488,15 +488,63 @@ Use the **scoringutils** package to compute the metrics — do not hand-code the
 
 ## 1. Input Data
 
-input file for forecast: `output/data/03_forecast/flusight_forecasts.csv`
+Read the forecasts from `output/data/03_forecast/flusight_forecasts.csv` (the
+FluSight long format: one row per `reference_date`, `horizon`, and
+`output_type_id` quantile). Read the observed truth from
+`output/data/01_cleaning/cleaned_flu_admissions.csv` (`week`, `location`,
+`value`).
 
-observed data: `output/data/01_cleaning/cleaned_flu_admissions.csv`
+Join each forecast row to the observed truth by matching the forecast's
+`target_end_date` to the observed `week` (both are US, weekly). 
 
-provide the file paths for the forecasts & observed data), merge them on a common key, and drop targets with no observed value. 
+## 2. Scoring with scoringutils
 
-join forecast and observed table by 
-target_end_date & week
+Shape the joined data into the long quantile format that scoringutils expects,
+renaming columns to its conventions: `output_type_id` → `quantile_level`,
+`value` → `predicted`, and the joined truth → `observed`. Add a constant
+`model` column (e.g. `"arima"`).
 
-Only forecasts with a matching observed value can be scored. The 2- and 3-week-ahead targets that fall beyond the last observed week have no truth to compare against, so we drop them.
-Including a message of how many combinations were dropped for lack of an observed target will act as a check in the code 
+Build the forecast object with `scoringutils::as_forecast_quantile()`, setting
+the forecast unit to `reference_date`, `horizon`, `target_end_date`, `location`,
+and `model` so each `reference_date` × `horizon` is scored as its own forecast.
+Then call `scoringutils::score()` on it.
+
+From the scored output, take the metrics FluSight reports:
+
+- **WIS** — the `wis` column returned by `score()`.
+- **AE** — the `ae_median` column (absolute error of the median forecast).
+- **95% PI coverage** — the 95% interval-coverage metric. If `score()`'s
+  defaults do not already include it, add it via scoringutils' interval-coverage
+  metric at the 95% range (e.g. supply a custom `interval_coverage` metric with
+  the interval range set to 95).
+
+## 3. Output Table
+
+Keep one row per scored `reference_date` × `horizon` with these columns in
+order: `reference_date`, `horizon`, `target_end_date`, `observed`, `WIS`,
+`AE`, `coverage_95`. Sort ascending by `reference_date`, then `horizon`. Round
+`WIS` and `AE` to one decimal.
+
+Print the table to the console and write it to
+`output/data/04_evaluation/forecast_scores.csv` (create the folder if absent).
+
+## 4. Summary by Horizon
+
+Summarize the per-reference-date scores across all reference dates, grouped by
+`horizon`, to show how forecast skill changes with lead time. For each horizon
+(`1`, `2`, `3`), compute over that horizon's scored reference dates:
+
+- the **mean** of `WIS`, `AE`, and `coverage_95` (the mean of the per-forecast
+  `AE` is the mean absolute error, `MAE`; the mean of the 0/1 coverage is the
+  empirical 95% coverage rate), and
+- the **range** (minimum and maximum) of `WIS` and `AE`.
+
+
+Assemble one row per horizon with these columns in order: `horizon`, `n`
+(number of scored reference dates), `WIS_mean`, `WIS_min`, `WIS_max`, `MAE_mean`,
+`MAE_min`, `MAE_max`, `coverage_95_mean`. Sort ascending by `horizon`. Round the
+`WIS_*` and `MAE_*` columns to one decimal and `coverage_95_mean` to two.
+
+Print this table to the console and write it to
+`output/data/04_evaluation/forecast_scores_by_horizon.csv`.
 
