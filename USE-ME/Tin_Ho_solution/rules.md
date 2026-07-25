@@ -483,8 +483,12 @@ Image save requirements:
 ---
 
 # Forecast Evaluation
-Save all code in this section to `output/scripts/04_evaluation.R`. If the folder path is not present, create it before saving the script.
-Use the **scoringutils** package to compute the metrics — do not hand-code the scoring formulas.
+
+Save all code in this section to `output/scripts/04_evaluation.R`. If the folder
+path is not present, create it before saving the script.
+
+Use the **scoringutils** package to compute the metrics — do not hand-code the scoring
+formulas.
 
 ## 1. Input Data
 
@@ -539,7 +543,6 @@ Summarize the per-reference-date scores across all reference dates, grouped by
   empirical 95% coverage rate), and
 - the **range** (minimum and maximum) of `WIS` and `AE`.
 
-
 Assemble one row per horizon with these columns in order: `horizon`, `n`
 (number of scored reference dates), `WIS_mean`, `WIS_min`, `WIS_max`, `MAE_mean`,
 `MAE_min`, `MAE_max`, `coverage_95_mean`. Sort ascending by `horizon`. Round the
@@ -548,3 +551,411 @@ Assemble one row per horizon with these columns in order: `horizon`, `n`
 Print this table to the console and write it to
 `output/data/04_evaluation/forecast_scores_by_horizon.csv`.
 
+---
+
+# Forecasting with a Wastewater Leading Indicator (ARIMAX)
+
+Save all code in this section to:
+
+Output folder: `output/scripts/05_incremental_changes.R`
+
+If the folder pathway is not present, create the folder pathway prior to saving
+the script.
+
+**`STRICT RULE`:** This section is an *additive* variant of the Forecasting
+section. Every rule from **Forecasting** (Rules 1, 2, 3, 5, and 6) applies
+verbatim and **must not be re-derived or altered**, with exactly these
+exceptions, spelled out below:
+
+1. Rule 4 (Model Specification) is replaced by Rule 4W.
+2. A new Rule 0W adds a second input (the wastewater series).
+3. All output paths gain a `WVAL_` filename prefix (Rule 7W).
+
+**`STRICT RULE`:** Nothing written by `03_forecast.R` or `04_evaluation.R` may be
+overwritten. The reference-date set, horizon set, quantile ladder, FluSight
+column order, clamping/rounding, and every existing `[val] …: OK` check are
+carried over unchanged so the two models are directly comparable.
+
+## 0W. Second Input: National Wastewater (NWSS WVAL)
+
+Read `data/NWSSWVALNational.csv`. Its raw columns are:
+
+- `Pathogen Target` — character
+- `Week End` — date in `M/D/YYYY` (US format, not zero-padded)
+- `National WVAL` — numeric wastewater viral activity level
+
+Processing steps:
+
+- Filter to `Pathogen Target == "Influenza A virus"`. Fail with a clear error if
+  zero rows remain.
+- Parse `Week End` with `%m/%d/%Y` into a `Date` column named `week`. If parsing
+  yields any `NA`, stop with `'The Week End could not be parsed.'`
+- Parse `National WVAL` with `readr::parse_number()` into a numeric column named
+  `wval`. If parsing yields any `NA`, stop with `'The National WVAL could not be
+  parsed.'`
+- Sort ascending by `week` and de-duplicate.
+
+**Validations:** Print the wastewater series date range and row count.
+**Validations:** Confirm `week` values are all the same weekday as the flu series
+(both are week-ending Saturdays) and are evenly spaced at 7 days; `stop()`
+otherwise.
+**Validations:** Print the number of weeks where the flu series and the
+wastewater series overlap, and the overlap date range.
+
+## 1W. Lagged Regressor Construction
+
+**`STRICT RULE`:** The regressor is the wastewater series **lagged by exactly 3
+weeks** (`WVAL_LAG <- 3`). Define, for any target week `t`:
+
+```
+wval_lag3(t) = wval at week (t - 7 * WVAL_LAG)
+```
+
+Rationale — record this in the script header. The lag is set to 3 (the maximum
+forecast horizon) so that every regressor value needed for horizons 1, 2, and 3
+is **already observed at the reference date** `r`:
+
+| horizon | target week | regressor week | status at time `r` |
+|---------|-------------|----------------|--------------------|
+| 1       | `r + 7`     | `r - 14`       | observed           |
+| 2       | `r + 14`    | `r - 7`        | observed           |
+| 3       | `r + 21`    | `r`            | observed           |
+
+This makes the forecast genuinely real-time: no future wastewater value is ever
+used. Do **not** shorten the lag to raise in-sample correlation — a shorter lag
+requires wastewater observations dated after the reference date, which leaks
+future information into the evaluation and inflates apparent skill.
+
+**Validations:** Print the chosen lag and the table above.
+**Validations:** Confirm that for **every** reference date, all three regressor
+weeks (`r - 14`, `r - 7`, `r`) are present in the wastewater series; `stop()`
+listing any reference date that fails.
+
+## 2W. Training Window Restriction
+
+Attach `wval_lag3` to the flu series by joining on `week`. Rows where
+`wval_lag3` is `NA` (i.e. weeks earlier than the first wastewater week plus 3
+weeks) **cannot** be used to fit an ARIMAX model and must be dropped from the
+training window.
+
+**`STRICT RULE`:** The reference-date set is **unchanged** from Rule 3 of the
+Forecasting section. Only the *training window* is shortened — for reference
+date `r`, fit on all rows with `week <= r` **and** non-`NA` `wval_lag3`.
+
+**Validations:** Print the ARIMAX training start date and state explicitly how
+many weeks of flu history are dropped relative to `03_forecast.R`'s
+univariate training window (which starts at the first observed flu week).
+**Validations:** Confirm the restricted training window is still contiguous
+(evenly spaced at 7 days, no gaps) after dropping `NA` rows; `stop()` otherwise.
+**Validations:** Confirm at least 52 training rows remain at the first reference
+date; `stop()` otherwise.
+
+## 4W. Model Specification (replaces Rule 4)
+
+- Package: **forecast** (`forecast::auto.arima()`).
+- Response: the influenza admissions series, as in Rule 4.
+- **External regressor:** `wval_lag3`, passed as a single-column numeric matrix
+  named `wval_lag3` via the `xreg` argument. This is the one permitted deviation
+  from Rule 4's "no covariates" clause.
+- Model class: a non-seasonal ARIMA with one external regressor — an ARIMAX /
+  regression-with-ARIMA-errors model — whose `(p, d, q)` order is selected
+  automatically by `auto.arima(y, xreg = x)`.
+
+**`STRICT RULE`:** As in Rule 4, the model is fit **exactly once per reference
+date**, and all three horizons come from a single
+`forecast(fit, h = 3, xreg = xreg_future, level = LEVELS)` call, where
+`xreg_future` is the 3-row matrix from Rule 1W. Do **not** refit per horizon.
+
+Carry over every Rule 4 validation (sorted / unique / evenly-spaced weeks,
+numeric non-negative NA-free response, non-constant series, printed `(p, d, q)`,
+fit-succeeded), and add:
+
+**Validations:** Print confirmation that `xreg` has the same number of rows as
+the response vector and contains no `NA`; `stop()` otherwise.
+**Validations:** Print confirmation that the regressor is not constant within
+the training window (a constant `xreg` is rank-deficient); `stop()` otherwise.
+**Validations:** Print the fitted coefficient on `wval_lag3` at each reference
+date, so the direction and stability of the wastewater effect is visible.
+**Validations:** Print confirmation that `xreg_future` has exactly 3 rows, one
+column, and no `NA`; `stop()` otherwise.
+
+## 5W. Forecast Generation
+
+Identical to Rule 5 of the Forecasting section — same `LEVELS`, same 23-quantile
+ladder, same clamp-at-0 and round-to-integer, same 69 rows per reference date,
+same FluSight column names and order, and **all** of the same output
+validations (finite values, non-decreasing ladder, non-negative integers,
+intervals widen with horizon, target dates correct, one fit → three horizons,
+all quantile levels present, median centered / symmetric on the raw pre-clamp
+forecast).
+
+## 6W. Forecast Figure
+
+Identical to Rule 6 of the Forecasting section (same plot type, observed line,
+per-horizon medians and 95% PI ribbons, axis labels, tick rules, legend, 300
+DPI), with one change: the plot title is
+
+`'USA 1-, 2-, & 3-Week-Ahead Influenza Hospitalization Forecast, Wastewater-Informed ARIMAX (2025-26 Season)'`
+
+Bold; Centered.
+
+## 7W. Output Paths (WVAL_ prefix)
+
+**`STRICT RULE`:** Write to the **same directories** used by `03_forecast.R`,
+with `WVAL_` prefixed to each filename. Never write to the unprefixed names.
+
+| Artifact | Path |
+|----------|------|
+| Forecast CSV | `output/data/03_forecast/WVAL_flusight_forecasts.csv` |
+| Forecast figure | `output/figures/03_forecast/WVAL_forecast_vs_observed.png` |
+
+**Validations:** Before writing, `stop()` if the target path resolves to either
+`flusight_forecasts.csv` or `forecast_vs_observed.png` without the `WVAL_`
+prefix.
+
+---
+
+# Wastewater Forecast Evaluation
+
+Save all code in this section to `output/scripts/06_evaluation_wval.R`. If the
+folder path is not present, create it before saving the script.
+
+**`STRICT RULE`:** This section is identical to the **Forecast Evaluation**
+section (same `scoringutils` usage, same join on `target_end_date == week`, same
+WIS / AE / 95% coverage metrics, same output table columns and ordering, same
+by-horizon summary and rounding) with only the input/output paths changed and
+the `model` label changed. Do not re-derive the scoring logic; mirror
+`04_evaluation.R`.
+
+Changes from the Forecast Evaluation section:
+
+| Item | Value |
+|------|-------|
+| Forecast input | `output/data/03_forecast/WVAL_flusight_forecasts.csv` |
+| Truth input | `output/data/01_cleaning/cleaned_flu_admissions.csv` (unchanged) |
+| `model` column | `"arimax_wval"` |
+| Per-forecast scores | `output/data/04_evaluation/WVAL_forecast_scores.csv` |
+| By-horizon summary | `output/data/04_evaluation/WVAL_forecast_scores_by_horizon.csv` |
+
+**`STRICT RULE`:** Never write to `forecast_scores.csv` or
+`forecast_scores_by_horizon.csv` (the unprefixed baseline outputs).
+
+**Validations:** `stop()` if either output path lacks the `WVAL_` prefix.
+**Validations:** Print the number of scorable and dropped `reference_date` ×
+`horizon` combinations, as in the Forecast Evaluation section.
+
+---
+
+# Forecasting with Gradient-Boosted Trees (XGBoost)
+
+Save all code in this section to:
+
+Output folder: `output/scripts/07_xgboost_forecast.R`
+
+If the folder pathway is not present, create the folder pathway prior to saving
+the script.
+
+**`STRICT RULE`:** This section is an *alternative-model* variant of the
+Forecasting section. It swaps `auto.arima()` for **XGBoost** and uses **no
+external regressor / leading indicator** — the flu admissions series is the only
+data source. Everything that is not the model itself is carried over from the
+Forecasting section verbatim and **must not be altered**: Rule 1 (Input Data),
+Rule 2 (Season Rules), Rule 3 (Training/Testing periods and the reference-date
+set), the FluSight long output format (Rule 5's 23-quantile ladder, clamp-at-0,
+round-to-integer, 69 rows per reference date, column names/order), and the
+figure (Rule 6). The reference-date set is **identical** to `03_forecast.R` so
+all three models (ARIMA, ARIMAX-wastewater, XGBoost) are directly comparable.
+
+**`STRICT RULE`:** Nothing written by `03_forecast.R`, `04_evaluation.R`,
+`05_incremental_changes.R`, or `06_evaluation_wval.R` may be overwritten. All
+XGBoost outputs carry an `XGB_` filename prefix in the same directories.
+
+## 1X. Feature Engineering
+
+XGBoost has no built-in autoregressive structure, so the series must be turned
+into a supervised feature matrix. For an *anchor week* `t` (the most recent week
+whose value is known) predicting a *target week* `t + 7h`, build these features:
+
+- `lag1 = value(t)`, `lag2 = value(t - 7)`, `lag3 = value(t - 14)`,
+  `lag4 = value(t - 21)` — the four most recent known admissions as of `t`.
+- `sin1`, `cos1`, `sin2`, `cos2` — first and second seasonal harmonics of the
+  **target** week's MMWR epiweek: `sin(2*pi*k*epiweek/52.18)` and the cosine, for
+  `k = 1, 2`. These carry the season shape.
+
+Rows with any `NA` feature (early weeks lacking four lags) are dropped from
+training.
+
+**Validations:** Print the feature names and confirm the feature matrix has no
+`NA` after dropping incomplete rows; `stop()` otherwise.
+
+## 3X. Direct Multi-Horizon Framing (adapts Rule 4's "one fit")
+
+**`STRICT RULE`:** Forecasting is **direct per horizon**. For each reference date
+`r` and each horizon `h ∈ {1, 2, 3}`, fit a **separate** XGBoost model whose
+target is `value(t + 7h)`. Training examples for horizon `h` at reference date
+`r` are all anchor weeks `t` such that both `t` has complete features and the
+target `t + 7h` is an **observed** week with `t + 7h <= r` (no future leakage).
+This yields **three fits per reference date** (one per horizon), replacing Rule
+4's single fit. Each fit still produces all 23 quantiles for its horizon from one
+model, so the "one model → all 23 quantiles" property is preserved per horizon.
+
+Prediction for horizon `h` at reference date `r` uses anchor week `r`: lag
+features are the last known admissions as of `r`, and the harmonics are those of
+target week `r + 7h`.
+
+## 4X. Model Specification (replaces Rule 4)
+
+- Package: **xgboost** (`xgboost::xgb.train`), install-if-missing like the other
+  scripts.
+- Objective: **`reg:quantileerror`** with `quantile_alpha` set to the full
+  23-value FluSight ladder, so a single fit predicts every quantile directly.
+- Fixed hyperparameters (a deployed model would tune these; kept fixed and
+  documented here for reproducibility): `eta = 0.05`, `max_depth = 3`,
+  `subsample = 0.8`, `colsample_bytree = 0.8`, `nrounds = 300`, `nthread = 1`,
+  and a fixed `seed` so runs are deterministic.
+- Response: influenza admissions only. No external regressors / leading
+  indicators.
+
+Carry over the applicable Rule 4 validations (training weeks sorted / unique /
+evenly-spaced on the base series; response numeric, non-negative, NA-free;
+series non-constant; fit returns a non-null model). Add:
+
+**Validations:** Print, at each reference date, the per-horizon training-row
+count and confirm each is `>= 30`; `stop()` otherwise.
+**Validations:** Confirm `predict()` returns exactly 23 values per prediction
+row (one per quantile); `stop()` otherwise.
+
+## 5X. Forecast Generation (adapts Rule 5)
+
+Identical to Rule 5 — same 23-quantile ladder, same clamp-at-0 and
+round-to-integer, same 69 rows per reference date, same FluSight column names
+and order — with these model-driven differences:
+
+- The 23 quantiles come from the XGBoost quantile model's prediction vector.
+  Because gradient-boosted quantile predictions can **cross**, sort each
+  prediction's 23 values ascending before mapping them to the ladder. The median
+  is the directly predicted `0.5` quantile.
+
+Keep these Rule 5 output validations as hard `stop()` checks: finite values;
+quantiles non-decreasing within each horizon (guaranteed by the sort, still
+verified); non-negative integers; all 23 quantile levels present exactly once;
+`target_end_date == reference_date + 7 * horizon`; exactly horizons {1, 2, 3}
+per reference date.
+
+**`STRICT RULE` (adapted checks):**
+
+- **Drop** the "median centered / quantiles symmetric" check — XGBoost quantiles
+  are asymmetric by construction, so Gaussian symmetry does not apply.
+- **Relax** the "intervals widen with horizon" check from a `stop()` to a
+  **reported diagnostic**: compute, per reference date, whether the 95% PI width
+  satisfies `h3 >= h2 >= h1`, print the fraction of reference dates that hold,
+  and do **not** halt. Direct per-horizon models are not guaranteed to widen
+  monotonically; this is expected, not a bug.
+
+## 6X. Forecast Figure (adapts Rule 6)
+
+Identical to Rule 6 (observed line, per-horizon medians and 95% PI ribbons, axis
+labels, tick rules, legend, 300 DPI), with the title:
+
+`'USA 1-, 2-, & 3-Week-Ahead Influenza Hospitalization Forecast, XGBoost Quantile Model (2025-26 Season)'`
+
+Bold; Centered.
+
+## 7X. Output Paths (XGB_ prefix)
+
+**`STRICT RULE`:** Write to the same directories as `03_forecast.R`, with `XGB_`
+prefixed to each filename. Never write the unprefixed names or the `WVAL_` names.
+
+| Artifact | Path |
+|----------|------|
+| Forecast CSV | `output/data/03_forecast/XGB_flusight_forecasts.csv` |
+| Forecast figure | `output/figures/03_forecast/XGB_forecast_vs_observed.png` |
+
+**Validations:** Before writing, `stop()` if either target path lacks the `XGB_`
+prefix.
+
+---
+
+# XGBoost Forecast Evaluation
+
+Save all code in this section to `output/scripts/08_evaluation_xgb.R`. If the
+folder path is not present, create it before saving the script.
+
+**`STRICT RULE`:** Identical to the **Forecast Evaluation** section (same
+`scoringutils` usage, same join on `target_end_date == week`, same
+WIS / AE / 95% coverage metrics, same output table columns and ordering, same
+by-horizon summary and rounding), with only the input/output paths and the
+`model` label changed. Mirror `04_evaluation.R`; do not re-derive the logic.
+
+Changes from the Forecast Evaluation section:
+
+| Item | Value |
+|------|-------|
+| Forecast input | `output/data/03_forecast/XGB_flusight_forecasts.csv` |
+| Truth input | `output/data/01_cleaning/cleaned_flu_admissions.csv` (unchanged) |
+| `model` column | `"xgboost"` |
+| Per-forecast scores | `output/data/04_evaluation/XGB_forecast_scores.csv` |
+| By-horizon summary | `output/data/04_evaluation/XGB_forecast_scores_by_horizon.csv` |
+
+**`STRICT RULE`:** Never write to the baseline or `WVAL_` score outputs.
+
+**Validations:** `stop()` if either output path lacks the `XGB_` prefix.
+**Validations:** Print the number of scorable and dropped `reference_date` ×
+`horizon` combinations, as in the Forecast Evaluation section.
+
+---
+
+# Final FluSight Submission Prep
+
+Save all code in this section to `output/scripts/final_prep.R`. If the folder
+path is not present, create it before saving the script.
+
+This stage does **no modeling**. It splits the finished XGBoost forecast file
+into one CSV per reference date, in the shape a FluSight submission expects.
+
+## 1. Input
+
+Read `output/data/03_forecast/XGB_flusight_forecasts.csv` (the FluSight long
+format written by `07_xgboost_forecast.R`). Parse `reference_date` and
+`target_end_date` as `Date`. Fail with a clear error if the file is missing or
+any of the eight expected columns is absent.
+
+## 2. Split and Write
+
+Create the output folder `output/data/final_flusight_submission` if it is not
+present.
+
+Split the forecasts by `reference_date`. Write one CSV per reference date to:
+
+`output/data/final_flusight_submission/{YYYY-MM-DD}-AmandaXGBoost.csv`
+
+where `{YYYY-MM-DD}` is that group's `reference_date` formatted as an ISO date.
+
+**`STRICT RULE`:** Each per-date file keeps the **full FluSight long format** —
+the same eight columns in the same order as the source file
+(`reference_date`, `target`, `horizon`, `target_end_date`, `location`,
+`output_type`, `output_type_id`, `value`) — and the same row ordering (by
+`horizon`, then ascending `output_type_id`). Do not drop, rename, reorder, or
+reformat any column. Dates serialize as ISO `YYYY-MM-DD` via
+`readr::write_csv()`.
+
+**`STRICT RULE`:** This script only reads the XGBoost forecast file and only
+writes into `output/data/final_flusight_submission`. It must never modify any
+file in `output/data/03_forecast` or `output/data/04_evaluation`.
+
+## 3. Validations
+
+All of these halt on failure:
+
+- The output directory path ends in `final_flusight_submission`.
+- Every emitted filename matches `^\d{4}-\d{2}-\d{2}-AmandaXGBoost\.csv$`.
+- One file is written per distinct `reference_date` — file count equals the
+  number of distinct reference dates.
+- Each file contains exactly **69** rows (3 horizons × 23 quantiles) and has a
+  single unique `reference_date` matching its filename.
+- Each file's columns are exactly the eight FluSight columns, in order.
+- Summed rows across all written files equals the source file's row count.
+- Each written file exists on disk after writing.
+
+Print one line per written file (`reference date → filename, n rows`) and a
+closing summary of the number of files and total rows written.

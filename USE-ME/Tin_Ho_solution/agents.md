@@ -111,7 +111,9 @@ Evaluate the accuracy of the rolling ARIMA forecasts using the `scoringutils` pa
 ### Task Specifications
 - **Input Forecasts**: `output/data/03_forecast/flusight_forecasts.csv`
 - **Input Observed**: `output/data/01_cleaning/cleaned_flu_admissions.csv`
-- **Output Script**: `output/scripts/04_evaluation.R`
+- **Output CSVs**:
+  - `output/data/04_evaluation/forecast_scores.csv`
+  - `output/data/04_evaluation/forecast_scores_by_horizon.csv`
 
 ### Evaluation Rules
 1. **Join Tables**: Merge forecast and observed data on common keys (`target_end_date == week` and `location`).
@@ -119,3 +121,107 @@ Evaluate the accuracy of the rolling ARIMA forecasts using the `scoringutils` pa
 3. **Drop Notice**: Print a console message reporting the number of `(reference_date, horizon)` combinations dropped due to missing observed targets.
 4. **Scoring**: Cast the data to `forecast_quantile` type using `scoringutils::as_forecast_quantile()` and run the `score()` function to compute metrics including Weighted Interval Score (WIS), bias, overprediction, underprediction, and interval coverages.
 5. **Reporting**: Print a summary of metrics grouped by forecast horizon to the terminal.
+
+---
+
+## 5. Wastewater-Informed ARIMAX Forecasting (`05_incremental_changes.R`)
+
+Incorporate National Wastewater viral activity level (WVAL) as a lagged leading indicator in an ARIMAX model.
+
+### Task Specifications
+- **Inputs**:
+  - `output/data/01_cleaning/cleaned_flu_admissions.csv`
+  - `data/NWSSWVALNational.csv`
+- **Output CSV**: `output/data/03_forecast/WVAL_flusight_forecasts.csv`
+- **Output Figure**: `output/figures/03_forecast/WVAL_forecast_vs_observed.png` (300 DPI)
+
+### Wastewater Processing Rules
+- Filter pathogen target strictly to `"Influenza A virus"`.
+- Parse dates with `%m/%d/%Y` and numeric values using `parse_number()`.
+- Validate that wastewater dates match the Saturday week-ending format of flu series and have contiguous 7-day spacing.
+
+### Lagged Regressor and Training Window
+- Construct lagged regressor with `WVAL_LAG = 3` weeks (so `wval_lag3(t) = wval(t - 21)`).
+- Verify that for every reference date, all three regressor weeks (`r - 14`, `r - 7`, `r`) are present in wastewater.
+- shortens training window to only rows where `wval_lag3` is non-NA. Validate that at least 52 training weeks remain.
+
+### Model and Validations
+- Fit `auto.arima(y, xreg = wval_lag3)` once per reference date.
+- Perform forecast with `forecast(fit, h = 3, xreg = xreg_future, level = LEVELS)`.
+- Enforce same hard checks as Baseline ARIMA: target dates correct, symmetric/centered pre-clamp forecasts, intervals widening, non-decreasing ladders, 23 quantiles present, non-negative integers.
+- Validate that output path basenames contain `WVAL_` prefix.
+
+---
+
+## 6. Wastewater ARIMAX Evaluation (`06_evaluation_wval.R`)
+
+Evaluate Wastewater-informed ARIMAX model performance.
+
+### Task Specifications
+- **Input Forecasts**: `output/data/03_forecast/WVAL_flusight_forecasts.csv`
+- **Input Observed**: `output/data/01_cleaning/cleaned_flu_admissions.csv`
+- **Output CSVs**:
+  - `output/data/04_evaluation/WVAL_forecast_scores.csv`
+  - `output/data/04_evaluation/WVAL_forecast_scores_by_horizon.csv`
+
+### Execution Rules
+- Run identical `scoringutils` analysis as stage 4, renaming model to `"arimax_wval"`.
+- Validate that output path basenames contain `WVAL_` prefix to prevent overwriting baseline results.
+
+---
+
+## 7. XGBoost Quantile Regression Forecasting (`07_xgboost_forecast.R`)
+
+Train direct multi-horizon XGBoost Quantile models using engineered lag and seasonal harmonic features.
+
+### Task Specifications
+- **Input**: `output/data/01_cleaning/cleaned_flu_admissions.csv`
+- **Output CSV**: `output/data/03_forecast/XGB_flusight_forecasts.csv`
+- **Output Figure**: `output/figures/03_forecast/XGB_forecast_vs_observed.png` (300 DPI)
+
+### Feature Engineering Rules
+- Create 4 lags of observed admissions as of anchor week `t`: `lag1 = value(t)`, `lag2 = value(t-7)`, `lag3 = value(t-14)`, `lag4 = value(t-21)`.
+- Create 1st and 2nd order trigonometric seasonal harmonics of the target week's MMWR epiweek: `sin(2*pi*k*epiweek/52.18)` and `cos` equivalents for `k=1, 2`.
+
+### Fitting & Generation Rules
+- Fit a separate XGBoost model for each horizon `h ∈ {1, 2, 3}` predicting `value(t + 7h)`. No future leakage: train only on anchor weeks where target `t + 7h <= r`.
+- Use objective `reg:quantileerror` with `quantile_alpha` containing all 23 FluSight quantiles.
+- Hyperparameters: `eta = 0.05`, `max_depth = 3`, `subsample = 0.8`, `colsample_bytree = 0.8`, `nrounds = 300`, `nthread = 1`, and set seed to `42`.
+- Sort predictions ascending to prevent crossing before mapping to the 23-quantile ladder.
+- Perform all hard post-clamp validations (finite, non-decreasing, integer, horizons ok, correct target end dates).
+- **Adapted checks**: Drop Gaussian symmetry validation. Relax the "intervals widen" check from a halt to a reported diagnostic fraction.
+- Validate that output path basenames contain `XGB_` prefix.
+
+---
+
+## 8. XGBoost Evaluation (`08_evaluation_xgb.R`)
+
+Evaluate direct multi-horizon XGBoost Quantile model performance.
+
+### Task Specifications
+- **Input Forecasts**: `output/data/03_forecast/XGB_flusight_forecasts.csv`
+- **Input Observed**: `output/data/01_cleaning/cleaned_flu_admissions.csv`
+- **Output CSVs**:
+  - `output/data/04_evaluation/XGB_forecast_scores.csv`
+  - `output/data/04_evaluation/XGB_forecast_scores_by_horizon.csv`
+
+### Execution Rules
+- Run identical `scoringutils` analysis as stage 4, renaming model to `"xgboost"`.
+- Validate that output path basenames contain `XGB_` prefix to prevent overwriting results.
+
+---
+
+## 9. Final FluSight Submission Prep (`final_prep.R`)
+
+Format and split finished forecasts into standard FluSight submission format.
+
+### Task Specifications
+- **Input Forecast**: `output/data/03_forecast/XGB_flusight_forecasts.csv`
+- **Output Directory**: `output/data/final_flusight_submission/`
+- **Output Files**: `{YYYY-MM-DD}-AmandaXGBoost.csv` (one file per distinct reference date)
+
+### Formatting & Validations
+- Ensure the output directory path ends in `final_flusight_submission`.
+- Each split file must contain exactly **69** rows (3 horizons × 23 quantiles) and have a single unique reference date matching its filename.
+- Columns must be exactly the 8 standard FluSight columns in order (`reference_date`, `target`, `horizon`, `target_end_date`, `location`, `output_type`, `output_type_id`, `value`).
+- Assert file count equals number of distinct reference dates, and sum of written rows equals source file's row count.
